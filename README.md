@@ -1,2 +1,2 @@
 # TinyBasicLCD
-Tinybasic for arduino in 
+Tinybasic for arduino in basic 
