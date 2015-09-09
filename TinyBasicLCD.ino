@@ -14,9 +14,31 @@
 //                 : Break key added
 //                 : Removed the calls to printf (left by debugging)
 
+#include <EEPROM.h>
+#include <LiquidCrystal.h>						// include the library code
+LiquidCrystal lcd(12, 11, 5, 4, 3, 2);			// initialize the library with the numbers of the interface pins
+#include <Servo.h> 
+Servo myservo[7];  								// create servo object to control a servo 
+
+int screenMem[72];
+int cursorX = 0;
+int checkChar = 0;
+
+byte pinDef[] = {2, 3, 4, 5, 6, 13};
+byte adcDef[] = {A0, A1, A2, A3, A4, A5};
+byte pinDir[7]; 					//0=input 1=output 9=servo
+byte pinStates[7];					//0 or 1.
+
 #ifndef ARDUINO
 #include "stdafx.h"
 #include <conio.h>
+
+// include the library code:
+//#include <LiquidCrystal.h>
+
+// initialize the library with the numbers of the interface pins
+
+
 #endif 
 
 // ASCII Characters
@@ -26,7 +48,7 @@
 #define BELL	'\b'
 #define DEL	'\177'
 #define SPACE   ' '
-#define CTRLC	0x03
+#define CTRLC	0xBB // Decimal ASCII 187 //This is Chatpad's CONTROL-C. Old version was 0x03
 #define CTRLH	0x08
 #define CTRLS	0x13
 #define CTRLX	0x18
@@ -55,6 +77,11 @@ static unsigned char keywords[] = {
 	'P','O','K','E'+0x80,
 	'S','T','O','P'+0x80,
 	'B','Y','E'+0x80,
+	'P','I','N','O','U','T'+0x80,
+	'D','E','L','A','Y'+0x80,
+	'S','E','R','V','O'+0x80,
+	'P','I','N','M','O','D','E'+0x80,
+	'P','W','M'+0x80,
 	0
 };
 
@@ -76,7 +103,13 @@ static unsigned char keywords[] = {
 #define KW_POKE		15
 #define KW_STOP		16
 #define KW_BYE		17
-#define KW_DEFAULT	18
+#define KW_PINOUT	18
+#define KW_DELAY	19
+#define KW_SERVO	20
+#define KW_PINMODE	21
+#define KW_PWM		22
+#define KW_DEFAULT	23
+
 
 struct stack_for_frame {
 	char frame_type;
@@ -95,11 +128,12 @@ struct stack_gosub_frame {
 
 static unsigned char func_tab[] = {
 	'P','E','E','K'+0x80,
-	'A','B','S'+0x80,
+	'P','I','N','I','N'+0x80,
+	
 	0
 };
 #define FUNC_PEEK    0
-#define FUNC_ABS	 1
+#define FUNC_PININ	 1
 #define FUNC_UNKNOWN 2
 
 static unsigned char to_tab[] = {
@@ -132,7 +166,7 @@ static unsigned char relop_tab[] = {
 
 #define VAR_SIZE sizeof(short int) // Size of variables in bytes
 
-static unsigned char memory[1400];
+static unsigned char memory[1200];
 static unsigned char *txtpos,*list_line;
 static unsigned char expression_error;
 static unsigned char *tempsp;
@@ -154,9 +188,9 @@ static const unsigned char invalidexprmsg[] = "Invalid expression";
 static const unsigned char syntaxmsg[] = "Syntax Error";
 static const unsigned char badinputmsg[] = "\nBad number";
 static const unsigned char nomemmsg[]	= "Not enough memory!";
-static const unsigned char initmsg[]	= "TinyBasic in C V0.03.";
-static const unsigned char memorymsg[]	= " bytes free.";
-static const unsigned char breakmsg[]	= "break!";
+static const unsigned char initmsg[]	= "TinyBasic";
+static const unsigned char memorymsg[]	= " Free.";
+static const unsigned char breakmsg[]	= "[BREAK]";
 static const unsigned char stackstuffedmsg[] = "Stack is stuffed!\n";
 static const unsigned char unimplimentedmsg[]	= "Unimplemented";
 static const unsigned char backspacemsg[]		= "\b \b";
@@ -472,11 +506,12 @@ static short int expr4(void)
 		switch(f)
 		{
 			case FUNC_PEEK:
-				a =  memory[a];
+				a =  EEPROM.read(a);
 				goto success;
-			case FUNC_ABS:
-				if(a < 0)
-					a = -a;
+			case FUNC_PININ:
+				if(a > -1 and a < 6 and pinDir[a] == 0) {	//Within pin range and pin is set to input?
+					a = digitalRead(pinDef[a]);
+				}
 				goto success;
 		}
 	}
@@ -617,7 +652,7 @@ warmstart:
 	// this signifies that it is running in 'direct' mode.
 	current_line = 0;
 	sp = memory+sizeof(memory);  
-	printmsg(okmsg);
+	//printmsg(okmsg);
 
 prompt:
 	while(!getln('>'))
@@ -849,6 +884,14 @@ interperateAtTxtpos:
 		case KW_BYE:
 			// Leave the basic interperater
 			return;
+		case KW_PINOUT:
+			goto pinout;
+		case KW_DELAY:
+			goto delayT;
+		case KW_SERVO:
+			goto servo;
+		case KW_PWM:
+			goto doPWM;
 		case KW_DEFAULT:
 			goto assignment;
 		default:
@@ -1078,15 +1121,15 @@ assignment:
 	goto run_next_statement;
 poke:
 	{
-		short int value;
-		unsigned char *address;
+		int value;
+		int address;
 
 		// Work out where to put it
 		expression_error = 0;
 		value = expression();
 		if(expression_error)
 			goto invalidexpr;
-		address = (unsigned char *)value;
+		address = value;
 
 		// check for a comma
 		ignore_blanks();
@@ -1100,13 +1143,192 @@ poke:
 		value = expression();
 		if(expression_error)
 			goto invalidexpr;
-//		printf("Poke %p value %i\n",address, (unsigned char)value);
+		EEPROM.write(address, value);
+		// printf("Poke %p value %i\n",address, (unsigned char)value);
 		// Check that we are at the end of the statement
 		if(!check_statement_end())
 			goto syntaxerror;
 	}
 	goto run_next_statement;
 
+pinout:
+	{
+		short int value;
+		byte whichPin;
+
+		// Work out where to put it
+		expression_error = 0;
+		value = expression();
+		if(expression_error)
+			goto invalidexpr;
+		whichPin = value;
+
+		// check for a comma
+		ignore_blanks();
+		if (*txtpos != ',')
+			goto syntaxerror;
+		txtpos++;
+		ignore_blanks();
+
+		// Now get the value to assign
+		expression_error = 0;
+		value = expression();
+		if(expression_error)
+			goto invalidexpr;
+			
+		pinMode(pinDef[whichPin], 1);	//Set to output
+		pinDir[whichPin] = 1;
+		pinStates[whichPin] = value;
+		digitalWrite(pinDef[whichPin], pinStates[whichPin]);
+		
+		if(!check_statement_end())
+			goto syntaxerror;
+	}
+	goto run_next_statement;	
+
+pinmode:
+	{
+		short int value;
+		byte whichPin;
+
+		// Work out where to put it
+		expression_error = 0;
+		value = expression();
+		if(expression_error)
+			goto invalidexpr;
+		whichPin = value;
+
+		// check for a comma
+		ignore_blanks();
+		if (*txtpos != ',')
+			goto syntaxerror;
+		txtpos++;
+		ignore_blanks();
+
+		// Now get the value to assign
+		expression_error = 0;
+		value = expression();
+		if(expression_error)
+			goto invalidexpr;
+		
+		pinDir[whichPin] = value;						//Set value in array
+		
+		pinMode(pinDef[whichPin], pinDir[whichPin]);	//Set pin to that mode
+		
+		if (value == 1) {								//Are we making it an input?
+		
+			digitalWrite(pinDef[whichPin], 1);			//Write a 1 to enable pull up resistors
+		
+		}
+		
+		if(!check_statement_end())
+			goto syntaxerror;
+	}
+	goto run_next_statement;
+	
+	
+delayT:
+	{
+		int value;
+
+		expression_error = 0;
+		value = expression();
+		if(expression_error)
+			goto invalidexpr;
+		delay(value);
+
+		if(!check_statement_end())
+			goto syntaxerror;
+	}
+	goto run_next_statement;	
+
+servo:
+	{
+		byte whichPin;		
+		byte value;
+
+		expression_error = 0;
+		value = expression();
+		if(expression_error)
+			goto invalidexpr;
+		whichPin = value;	//Which pin we're attaching the servo too.
+
+		// check for a comma
+		ignore_blanks();
+		if (*txtpos != ',')
+			goto syntaxerror;
+		txtpos++;
+		ignore_blanks();
+
+		// Now get the value to assign
+		expression_error = 0;
+		value = expression();
+		if(expression_error)
+			goto invalidexpr;
+			
+		if (pinDir[whichPin] != 9) {					//Pin not already set for servo?
+		
+			myservo[whichPin].attach(pinDef[whichPin]);	//Attach servo[num] to that pin found in the mapping.
+		
+			pinDir[whichPin] = 9;						//Set flag that says a Servo is here
+	
+		}
+
+		if (value == 255) {							//Flag to detach servo?
+			
+			myservo[whichPin].detach();				//Detach servo
+			
+			pinDir[whichPin] = 0;					//Clear pin status
+			
+		}
+		
+		if (value < 255) {							//Normal function?
+			myservo[whichPin].write(value);
+		}		
+
+		
+		if(!check_statement_end())
+			goto syntaxerror;
+	}
+	goto run_next_statement;	
+
+doPWM:
+	{
+		short int value;
+		byte whichPin;
+
+		// Work out where to put it
+		expression_error = 0;
+		value = expression();
+		if(expression_error)
+			goto invalidexpr;
+		whichPin = value;
+		if (whichPin != 1 and whichPin != 3 and whichPin != 4) 	//Not a PWM enabled pin?
+			goto invalidexpr;										//Error		
+		
+		// check for a comma
+		ignore_blanks();
+		if (*txtpos != ',')
+			goto syntaxerror;
+		txtpos++;
+		ignore_blanks();
+
+		// Now get the value to assign
+		expression_error = 0;
+		value = expression();
+		if(expression_error)
+			goto invalidexpr;
+			
+		pinMode(pinDef[whichPin], 1);	//Set to output
+		pinDir[whichPin] = 1;
+		pinStates[whichPin] = value;
+		analogWrite(pinDef[whichPin], pinStates[whichPin]);
+		
+		if(!check_statement_end())
+			goto syntaxerror;
+	}
+	goto run_next_statement;		
+	
 list:
 	linenum = testnum(); // Retuns 0 if no line found.
 
@@ -1116,8 +1338,15 @@ list:
 
 	// Find the line
 	list_line = findline();
-	while(list_line != program_end)
-          printline();
+	
+	if (linenum != 0) {						//A specific line indicated?
+		printline();						//Then print only it.	
+	}
+	else {									//Else, print everything up to the end
+		while(list_line != program_end)
+			printline();
+	}
+	
 	goto warmstart;
 
 print:
@@ -1199,8 +1428,17 @@ static int inchar()
 #ifdef ARDUINO
   while(1)
   {
-    if(Serial.available())
-      return Serial.read();
+    if(Serial.available()) {
+	  
+	  checkChar = Serial.read();
+	  
+	  if (checkChar != 0) {	//Not a null value of some kind?
+	  
+		return checkChar;
+	  
+	  }
+	  
+	}
   }
 #else
 	return getch();
@@ -1211,22 +1449,104 @@ static int inchar()
 static void outchar(unsigned char c)
 {
 #ifdef ARDUINO
-  Serial.write(c);
+  //Serial.write(c);
+
+
+	lcdChar(c);
+
+
 #else
 	putch(c);
 #endif
 }
 
+static void lcdChar(byte c) {
+
+	if (c == 8) {	//Backspace?
+	
+		if (cursorX > 0) {
+	
+			cursorX -= 1;	//Go back one
+			screenMem[56 + cursorX] = 32;	//Erase it from memory
+			doFrame(56 + cursorX); //Redraw screen up to that amount
+			
+		}
+	
+	}
+
+	if (c != 13 and c != 10 and c != 8) {	//Not a backspace or return, just a normal character
+	
+		screenMem[56 + cursorX] = c;
+		cursorX += 1;
+		if (cursorX < 16) {
+		
+		lcd.write(c);
+		
+		}
+		
+	}
+	
+	if (cursorX == 16 or c == 10) {			//Did we hit Enter or go type past the end of a visible line?
+	
+		for (int xg = 0 ; xg < 16 ; xg++) {
+
+			screenMem[0 + xg] = screenMem[40 + xg];
+			screenMem[40 + xg] = screenMem[16 + xg];		
+			screenMem[16 + xg] = screenMem[56 + xg];
+			screenMem[56 + xg] = 32;
+		
+		
+		}
+	
+		cursorX = 0;
+		
+		doFrame(56);	
+
+	}
+
+
+}
+
+static void doFrame(byte amount) {
+
+	lcd.clear();
+	lcd.noCursor();
+		
+	for (int xg = 0 ; xg < amount ; xg++) {
+	
+		lcd.write(screenMem[xg]);
+	}
+
+	lcd.cursor();
+
+}
+
 #ifdef ARDUINO
 /***********************************************************/
+
+
+
+
+
+
 void setup()
 {
-  	Serial.begin(9600);	// opens serial port, sets data rate to 9600 bps
+  	Serial.begin(4800);	// opens serial port, sets data rate to 9600 bps
+	lcd.begin(16, 4);
+
+	for (int xg = 0 ; xg < 72 ; xg++) {
+		screenMem[xg] = 32;
+	}
+
+	lcd.blink();
+	
+	doFrame(56);
+		
 }
 #endif
 
 #ifndef ARDUINO
-/***********************************************************/
+//***********************************************************/
 int main()
 {
  while(1)
